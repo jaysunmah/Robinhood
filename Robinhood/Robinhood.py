@@ -68,6 +68,7 @@ class Robinhood:
         }
         self.session.headers = self.headers
         self.auth_method = self.login_prompt
+        self.instrument_cache = {}
 
     def login_required(function):  # pylint: disable=E0213
         """ Decorator function that prompts user for login if they are not logged in already. Can be applied to any function using the @ notation. """
@@ -89,6 +90,7 @@ class Robinhood:
     def login(self,
               username,
               password,
+              device_token,
               mfa_code=None):
         """Save and test login info for Robinhood accounts
 
@@ -106,7 +108,8 @@ class Robinhood:
             'password': password,
             'username': self.username,
             'grant_type': 'password',
-            'client_id': self.client_id
+            'client_id': self.client_id,
+            'device_token': device_token
         }
 
         if mfa_code:
@@ -831,6 +834,44 @@ class Robinhood:
 
         return self.session.get(endpoints.orders(orderId), timeout=15).json()
 
+    @login_required
+    def full_order_history(self, use_cache=True, start=None, end=None):
+        # if use_cache, check for local file
+        # return it if it's not too long ago? 
+        res = self.order_history()
+        result = []
+        while res['next'] is not None:
+            next_url = res['next']
+            result += res['results']
+            res = self.session.get(next_url, timeout=15).json()
+        if res['results'] is not None:
+            result += res['results']
+        history = []
+        for log in result[::-1]:
+            symbol = self.instrument_lookup(log['instrument'])
+            if log['state'] == 'filled':
+                history.append({
+                    'symbol': symbol,
+                    'action': log['side'],
+                    'shares': log['quantity'],
+                    'price': log['executions'][0]['price'],
+                    'date': log['created_at'],
+                })
+        return history
+
+    @login_required
+    def portfolio_history(self):
+        """
+            Returns dict which maps date to portfolio at that timestep
+        """
+        return []
+
+    def instrument_lookup(self, instrument_url):
+        if instrument_url in self.instrument_cache:
+            return self.instrument_cache[instrument_url]
+        res = self.session.get(instrument_url, timeout=15).json()
+        self.instrument_cache[instrument_url] = res['symbol']
+        return res['symbol']
 
     def dividends(self):
         """Wrapper for portfolios
