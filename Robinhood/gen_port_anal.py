@@ -7,6 +7,7 @@ parser.add_argument('--username', '-u', help='Robinhood username', required=True
 parser.add_argument('--password', '-p', help='Robinhood password')
 parser.add_argument('--password_file', '-pf', help='Robinhood password file')
 parser.add_argument('--device_token', '-d', help='Robinhood device token for login')
+parser.add_argument('--api_key', '-a', help='Iex cloud api key')
 args = parser.parse_args()
 
 # ============================================
@@ -14,6 +15,7 @@ args = parser.parse_args()
 # ============================================
 device_token = args.device_token
 username = args.username
+api_key = args.api_key
 if args.password:
     password = args.password
 elif args.password_file:
@@ -44,7 +46,7 @@ transfer_history = my_trader.get_all_transfers()
 # ============================================
 # 4. Scrape for stock prices
 # ============================================
-my_trader.save_stock_prices(portfolio_history)
+my_trader.save_stock_prices(portfolio_history, api_key=api_key)
 
 # ============================================
 # 5. Compute time weighted returns

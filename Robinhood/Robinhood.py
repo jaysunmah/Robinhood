@@ -1018,12 +1018,12 @@ class Robinhood:
             sum_cost_cache[date] = copy.deepcopy(running_cost_cache)
         return sum_cost_cache
 
-    def save_stock_prices(self, port_hist):
+    def save_stock_prices(self, port_hist, api_key=""):
         start_date = sorted(port_hist.keys())[0]
         end_date = sorted(port_hist.keys())[-1]
         stocks = port_hist[start_date].keys()
 
-        iex = IexStock("pk_2e549f88bdd440ad90527ce7b3f641dd")
+        iex = IexStock(api_key)
 
         if not os.path.exists("{}/historical_prices".format(RH_CACHE_DIR)):
             os.mkdir("{}/historical_prices".format(RH_CACHE_DIR))
