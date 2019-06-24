@@ -6,12 +6,13 @@ parser = argparse.ArgumentParser(description='Analyze robinhood portfolio')
 parser.add_argument('--username', '-u', help='Robinhood username', required=True)
 parser.add_argument('--password', '-p', help='Robinhood password')
 parser.add_argument('--password_file', '-pf', help='Robinhood password file')
+parser.add_argument('--device_token', '-d', help='Robinhood device token for login')
 args = parser.parse_args()
 
 # ============================================
 # 0. Log into rh account
 # ============================================
-device_token = 'e86527b8-af87-4ad1-a33f-5589401ddc45'
+device_token = args.device_token
 username = args.username
 if args.password:
     password = args.password
