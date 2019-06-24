@@ -33,18 +33,24 @@ orders = my_trader.full_order_history()
 # 2. Get portfolio history
 # ============================================
 portfolio_history = my_trader.portfolio_history(order_history=orders)
+stock_costs = my_trader.get_stock_costs(orders, portfolio_history)
 
 # ============================================
-# 3. Scrape for stock prices
+# 3. Fetch withdrawal / deposit history
+# ============================================
+transfer_history = my_trader.get_all_transfers()
+
+# ============================================
+# 4. Scrape for stock prices
 # ============================================
 my_trader.save_stock_prices(portfolio_history)
 
+# ============================================
+# 5. Compute time weighted returns
+# ============================================
+# TODO: Need to add dividends + options trading
+twr = my_trader.time_weighted_returns(portfolio_history, transfer_history, stock_costs)
 
 # ============================================
-# 4. Compute time weighted returns
-# ============================================
-
-
-# ============================================
-# 5. Generate ui to view info
+# 6. Generate ui to view info
 # ============================================

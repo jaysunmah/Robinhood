@@ -17,7 +17,7 @@ import six
 import dateutil
 from dateutil.rrule import DAILY, rrule, MO, TU, WE, TH, FR
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import csv
 import copy
@@ -26,7 +26,8 @@ import copy
 from . import exceptions as RH_exception
 from . import endpoints
 from RobinhoodOrder import RobinhoodOrder, getOrderFromDict
-from IexStock import IexStock
+from IexStock import IexStock, get_stock_cache
+import matplotlib.pyplot as plt
 
 RH_CACHE_DIR = ".rh_cache"
 def daterange(start_date, end_date):
@@ -35,6 +36,12 @@ def daterange(start_date, end_date):
 # https://stackoverflow.com/questions/4039879/best-way-to-find-the-months-between-two-dates/21644877
 def diff_month(d1, d2):
     return (d1.year - d2.year) * 12 + d1.month - d2.month
+
+def sum_dict(d):
+    res = 0
+    for k in d:
+        res += d[k]
+    return res
 
 class Bounds(Enum):
     """Enum for bounds in `historicals` endpoint """
@@ -659,6 +666,25 @@ class Robinhood:
         res.raise_for_status()
         return res.json()
 
+    @login_required
+    def get_all_transfers(self):
+        res = {
+            'next': endpoints.ach('transfers'),
+        }
+        result = []
+        while res['next'] is not None:
+            next_url = res['next']
+            res = self.session.get(next_url, timeout=15).json()
+            for log in res['results']:
+                # TODO oop-ify this
+                result.append({
+                    # 'date': log['expected_landing_date'].split("T")[0],
+                    'date': log['created_at'].split("T")[0],
+                    'amount': log['amount'],
+                    'type': log['direction']
+                })
+        return result
+
     ###########################################################################
     #                           GET OPTIONS INFO
     ###########################################################################
@@ -869,6 +895,8 @@ class Robinhood:
                     history.append(getOrderFromDict(d))
         # TODO: Add schema validation to make sure this is coherent with normal fn
         # Basically check that history objects conform to a RobinhoodOrder object
+
+        # TODO Just always use cached file, and just add onto it if we detect anything new
         return history
 
     @login_required
@@ -900,8 +928,8 @@ class Robinhood:
                     symbol, 
                     log['side'], 
                     log['quantity'], 
-                    log['executions'][0]['price'], 
-                    log['created_at']))
+                    log['executions'][-1]['price'], 
+                    log['executions'][-1]['timestamp']))
 
         # Write to local cache
         if len(history) > 0:
@@ -973,6 +1001,23 @@ class Robinhood:
                         result[strdate][header[i]] = row[i]
         return result
 
+    def get_stock_costs(self, order_history, port_hist):
+        cost_cache = {}
+        for date in port_hist:
+            cost_cache[date] = { stock: 0 for stock in port_hist[date] }
+        for log in order_history:
+            date = log.getDate()
+            while date not in cost_cache:
+                date = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+            cost_cache[date][log.symbol] += log.getPrice()
+        sum_cost_cache = {}
+        running_cost_cache = { stock: 0 for stock in cost_cache[sorted(cost_cache.keys())[0]] }
+        for date in sorted(cost_cache.keys()):
+            for stock in cost_cache[date]:
+                running_cost_cache[stock] += cost_cache[date][stock]
+            sum_cost_cache[date] = copy.deepcopy(running_cost_cache)
+        return sum_cost_cache
+
     def save_stock_prices(self, port_hist):
         start_date = sorted(port_hist.keys())[0]
         end_date = sorted(port_hist.keys())[-1]
@@ -1031,6 +1076,72 @@ class Robinhood:
         res = self.session.get(instrument_url, timeout=15).json()
         self.instrument_cache[instrument_url] = res['symbol']
         return res['symbol']
+
+    def time_weighted_returns(self, port_hist, transfer_hist, stock_costs):
+        start_date = sorted(port_hist.keys())[0]
+        end_date = sorted(port_hist.keys())[-1] 
+        stock_cache = get_stock_cache("{}/historical_prices".format(RH_CACHE_DIR), start_date, end_date)
+        stocks = port_hist[start_date].keys()
+
+        # TODO make sure stock cache is valid
+
+        cash_flow = {}
+        port_value = {}
+
+        for day in sorted(port_hist.keys()):
+            portfolio = port_hist[day]
+            port_stock_value = 0
+            for stock in portfolio:
+                stock_value = 0 if day not in stock_cache or stock not in stock_cache[day] else float(stock_cache[day][stock])
+                shares = float(portfolio[stock])
+                port_stock_value += stock_value * shares
+            if port_stock_value != 0:
+                port_value[day] = port_stock_value
+                cash_flow[day] = 0 # If port stock value is 0, this is a holiday
+
+        for log in transfer_hist:
+            date = log['date']
+            while date not in cash_flow:
+                date = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+            if log['type'] == 'deposit':
+                cash_flow[date] += float(log['amount'])
+            else:
+                cash_flow[date] -= float(log['amount'])
+        
+        cum_cash = {}
+        sum_cash = 0
+        for day in sorted(cash_flow.keys()):
+            sum_cash += cash_flow[day]
+            cum_cash[day] = sum_cash
+
+        for day in port_value:
+            port_value[day] += cum_cash[day] + sum_dict(stock_costs[day])
+
+        prev_date = None
+        cum_product = 1
+        twr = {}
+        for day in sorted(port_value.keys()):
+            if prev_date is None:
+                prev_date = day
+            else:
+                cur_cash_flow = cash_flow[day] 
+                end_val = port_value[day]
+                init_val = port_value[prev_date]
+                hpr_n = (end_val - (init_val + cur_cash_flow)) / (init_val + cur_cash_flow)
+                cum_product *= (hpr_n + 1)
+                prev_date = day
+                twr[day] = (cum_product - 1) * 100
+
+        xaxis = [d for d in sorted(twr.keys())]
+        yaxis = [twr[d] for d in xaxis]
+
+        for d in xaxis:
+            print(d, twr[d])
+
+        num_xaxis = [i for i in range(len(xaxis))]
+        plt.plot(num_xaxis, yaxis)
+        plt.show()
+        return twr
 
     def dividends(self):
         """Wrapper for portfolios
