@@ -15,10 +15,26 @@ import getpass
 import requests
 import six
 import dateutil
+from dateutil.rrule import DAILY, rrule, MO, TU, WE, TH, FR
+
+from datetime import datetime
+import os
+import csv
+import copy
 
 #Application-specific imports
 from . import exceptions as RH_exception
 from . import endpoints
+from RobinhoodOrder import RobinhoodOrder, getOrderFromDict
+from IexStock import IexStock
+
+RH_CACHE_DIR = ".rh_cache"
+def daterange(start_date, end_date):
+    return rrule(DAILY, dtstart=start_date, until=end_date, byweekday=(MO,TU,WE,TH,FR))
+
+# https://stackoverflow.com/questions/4039879/best-way-to-find-the-months-between-two-dates/21644877
+def diff_month(d1, d2):
+    return (d1.year - d2.year) * 12 + d1.month - d2.month
 
 class Bounds(Enum):
     """Enum for bounds in `historicals` endpoint """
@@ -69,6 +85,8 @@ class Robinhood:
         self.session.headers = self.headers
         self.auth_method = self.login_prompt
         self.instrument_cache = {}
+        if not os.path.exists(RH_CACHE_DIR):
+            os.mkdir(RH_CACHE_DIR)
 
     def login_required(function):  # pylint: disable=E0213
         """ Decorator function that prompts user for login if they are not logged in already. Can be applied to any function using the @ notation. """
@@ -834,9 +852,37 @@ class Robinhood:
 
         return self.session.get(endpoints.orders(orderId), timeout=15).json()
 
+    def get_cached_order_history(self):
+        files = sorted(os.listdir("{}/order_history".format(RH_CACHE_DIR)))
+        history = []
+        with open("{}/order_history/{}".format(RH_CACHE_DIR, files[-1]), "r") as f:
+            print("[INFO] Found cached order history file: ", files[-1])
+            csv_reader = csv.reader(f, delimiter=",")
+            headers = None
+            for row in csv_reader:
+                if headers is None:
+                    headers = [k for k in row]
+                else:
+                    d = {}
+                    for i in range(len(row)):
+                        d[headers[i]] = row[i]
+                    history.append(getOrderFromDict(d))
+        # TODO: Add schema validation to make sure this is coherent with normal fn
+        # Basically check that history objects conform to a RobinhoodOrder object
+        return history
+
     @login_required
     def full_order_history(self, use_cache=True, start=None, end=None):
+        """
+            Returns array of order objects
+        """
         # if use_cache, check for local file
+        if (use_cache and 
+        os.path.exists("{}/order_history".format(RH_CACHE_DIR)) and 
+        len(os.listdir("{}/order_history".format(RH_CACHE_DIR))) > 0):
+            return self.get_cached_order_history()
+
+        print("[INFO] Not using cache, retrieving order history data from Robinhood")
         # return it if it's not too long ago? 
         res = self.order_history()
         result = []
@@ -850,23 +896,136 @@ class Robinhood:
         for log in result[::-1]:
             symbol = self.instrument_lookup(log['instrument'])
             if log['state'] == 'filled':
-                history.append({
-                    'symbol': symbol,
-                    'action': log['side'],
-                    'shares': log['quantity'],
-                    'price': log['executions'][0]['price'],
-                    'date': log['created_at'],
-                })
+                history.append(RobinhoodOrder(
+                    symbol, 
+                    log['side'], 
+                    log['quantity'], 
+                    log['executions'][0]['price'], 
+                    log['created_at']))
+
+        # Write to local cache
+        if len(history) > 0:
+            if not os.path.exists("{}/order_history".format(RH_CACHE_DIR)):
+                os.mkdir("{}/order_history".format(RH_CACHE_DIR))
+            with open("{}/order_history/{}.csv".format(RH_CACHE_DIR, str(datetime.now())), "w") as f:
+                csv_writer = csv.writer(f, delimiter=",", quotechar='"')
+                csv_writer.writerow(history[0].getCsvHeader())
+                for log in history:
+                    csv_writer.writerow(log.getCsvRow())
         return history
 
-    @login_required
-    def portfolio_history(self):
+    def portfolio_history(self, order_history=None, use_cache=True):
+        if order_history is None: order_history = self.full_order_history()
         """
             Returns dict which maps date to portfolio at that timestep
+            This has some tricky pointer shortcuts so be careful of bugs here
         """
-        return []
+        # Check to make sure order history is sorted chronologically
+        order_history = sorted(order_history, key=lambda x: x.date)
+
+        running_portfolio = {}
+        port_hist = {}
+        all_stocks = set()
+
+        for log in order_history:
+            all_stocks.add(log.symbol)
+            date = log.getDate()
+            if date not in port_hist:
+                running_portfolio = copy.deepcopy(running_portfolio)
+                port_hist[date] = running_portfolio
+            if log.symbol not in running_portfolio:
+                running_portfolio[log.symbol] = 0
+            if log.action == "sell":
+                running_portfolio[log.symbol] -= float(log.shares)
+            else:
+                running_portfolio[log.symbol] += float(log.shares)
+
+        start_date = datetime.strptime(sorted(port_hist.keys())[0], "%Y-%m-%d")
+        end_date = datetime.now()
+
+        # Write to local cache and format result
+        # Format will be like 
+        # date,stock1,stock2,stock3
+        # xx.xx.xx,0,0,0,0
+        if not os.path.exists("{}/port_history".format(RH_CACHE_DIR)):
+            os.mkdir("{}/port_history".format(RH_CACHE_DIR))
+
+        result = {}
+        with open("{}/port_history/{}.csv".format(RH_CACHE_DIR, str(datetime.now())), "w") as f:
+            csv_writer = csv.writer(f, delimiter=",", quotechar='"')
+            running_portfolio = None
+            header = ["date"]
+            for stock in all_stocks:
+                header.append(stock)
+            csv_writer.writerow(header)
+            for date in daterange(start_date, end_date):
+                strdate = datetime.strftime(date, "%Y-%m-%d")
+                if strdate in port_hist: 
+                    running_portfolio = port_hist[strdate]
+                row = [strdate]
+                for stock in all_stocks:
+                    stock_shares = 0 if stock not in running_portfolio else running_portfolio[stock] 
+                    row.append(stock_shares)
+                csv_writer.writerow(row)
+                result[strdate] = {}
+                for i in range(len(header)):
+                    if header[i] != "date":
+                        result[strdate][header[i]] = row[i]
+        return result
+
+    def save_stock_prices(self, port_hist):
+        start_date = sorted(port_hist.keys())[0]
+        end_date = sorted(port_hist.keys())[-1]
+        stocks = port_hist[start_date].keys()
+
+        iex = IexStock("pk_2e549f88bdd440ad90527ce7b3f641dd")
+
+        if not os.path.exists("{}/historical_prices".format(RH_CACHE_DIR)):
+            os.mkdir("{}/historical_prices".format(RH_CACHE_DIR))
+
+        for stock in stocks: 
+            filepath = "{}/historical_prices/{}.csv".format(RH_CACHE_DIR, stock)
+            if not os.path.exists(filepath):
+                print("[INFO] Unable to find cached stock price for {}, retrieving past 15 years of stock data".format(stock))
+                data = iex.hist_data(stock, "max")
+                with open(filepath, "w") as f:
+                    csv_writer = csv.writer(f, delimiter=",")
+                    csv_writer.writerow(["date, close"])
+                    for log in data:
+                        csv_writer.writerow([log['date'], log['close']])
+            else:
+                with open(filepath, "r") as f:
+                    csv_reader = csv.reader(f, delimiter=",")
+                    for row in csv_reader:
+                        last_date = row[0]
+                if last_date != end_date:
+                    ld = datetime.strptime(last_date, "%Y-%m-%d")
+                    ed = datetime.strptime(end_date, "%Y-%m-%d")
+                    if (ed.year - ld.year) >= 2: # Difference is AT LEAST 2 years
+                        request_range = "max"
+                    elif (ed.year - ld.year) == 1: # Difference is AT LEAST a year
+                        request_range = "2y"
+                    elif diff_month(ed, ld) > 6: # Difference is AT 6 months
+                        request_range = "1y"
+                    elif diff_month(ed, ld) > 3:
+                        request_range = "6m"
+                    elif diff_month(ed, ld) > 1:
+                        request_range = "3m"
+                    elif (ed - ld).days > 5:
+                        request_range = "1m"
+                    else:
+                        request_range = "5d"
+                    print("[INFO] Found {} needs updating. Last saved date: {} Portfolio end date: {} Range: {}".format(stock, last_date, end_date, request_range))
+                    data = iex.hist_data(stock, request_range)
+                    with open(filepath, "a") as f:
+                        csv_writer = csv.writer(f, delimiter=",")
+                        for log in data:
+                            logdate = datetime.strptime(log['date'], "%Y-%m-%d")
+                            if logdate > ld:
+                                csv_writer.writerow([log['date'], log['close']])
 
     def instrument_lookup(self, instrument_url):
+        # TODO maybe?? add a caching layer for this if we actually care
         if instrument_url in self.instrument_cache:
             return self.instrument_cache[instrument_url]
         res = self.session.get(instrument_url, timeout=15).json()

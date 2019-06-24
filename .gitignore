@@ -68,3 +68,4 @@ target/
 .idea/
 
 pass.txt
+.rh_cache

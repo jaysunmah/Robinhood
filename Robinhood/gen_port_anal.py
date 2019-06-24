@@ -21,22 +21,23 @@ elif args.password_file:
 else:
     password = getpass.getpass()
 my_trader = Robinhood()
+# TODO see if we even need to log in anymore if we just use cached files
 logged_in = my_trader.login(username=username, password=password, device_token=device_token)
 
 # ============================================
 # 1. Fetch order history
 # ============================================
 orders = my_trader.full_order_history()
-print len(orders)
 
 # ============================================
 # 2. Get portfolio history
 # ============================================
-
+portfolio_history = my_trader.portfolio_history(order_history=orders)
 
 # ============================================
 # 3. Scrape for stock prices
 # ============================================
+my_trader.save_stock_prices(portfolio_history)
 
 
 # ============================================
